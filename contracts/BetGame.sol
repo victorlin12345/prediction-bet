@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "hardhat/console.sol";
 
 // StartTime -> LockTime -> EndTime
 contract BetGame is Ownable, Pausable, ReentrancyGuard {
@@ -13,6 +14,14 @@ contract BetGame is Ownable, Pausable, ReentrancyGuard {
     modifier notContract() {
         require(!_isContract(msg.sender), "contract not allowed");
         require(msg.sender == tx.origin, "proxy contract not allowed");
+        _;
+    }
+
+    modifier bettable() {
+        require(msg.value >= minBetAmount, "Bet amount must be greater than minBetAmount");
+        require(Bets[currentRoundID][msg.sender].Amount == 0, "Can only bet once per round");
+        require(block.timestamp > Games[currentRoundID].StartTime, "should bet after start time");
+        require(block.timestamp < Games[currentRoundID].LockTime, "should bet before lock time");
         _;
     }
     
@@ -36,9 +45,9 @@ contract BetGame is Ownable, Pausable, ReentrancyGuard {
     }
 
     enum Result {
+        NoWinner,
         Bull,
-        Bear,
-        NoWinner
+        Bear
     }
 
     struct BetInfo {
@@ -57,7 +66,7 @@ contract BetGame is Ownable, Pausable, ReentrancyGuard {
     uint256 currentRoundID = 1;
     uint256 interval = 60 * 60 * 3; // 3 hours
     uint256 toleranceInterval = 30;
-    uint256 rewardInterval = 60 * 60;
+    uint256 rewardInterval = 60 * 60 * 1;
     uint256 minBetAmount = 0.001 ether;
 
     mapping(uint256 => RoundInfo) public Games;
@@ -68,6 +77,18 @@ contract BetGame is Ownable, Pausable, ReentrancyGuard {
 
     constructor(address _priceFeed) {
          priceFeed = AggregatorV3Interface(_priceFeed);
+    }
+
+    function GetRoundInfo(uint256 _round) public view returns (RoundInfo memory) {
+        return Games[_round];
+    }
+
+    function GetBetInfo(uint256 _round, address _user)  public view returns (BetInfo memory) {
+        return Bets[_round][_user];
+    }
+
+     function GetResultInfo(uint256 _round) public view returns (ResultInfo memory) {
+        return Results[_round];
     }
     
     function _setRoundBegin(uint256 _round, int256 _startPrice) private {
@@ -134,10 +155,7 @@ contract BetGame is Ownable, Pausable, ReentrancyGuard {
         return price;
     }
 
-    function BetBull() public payable whenNotPaused nonReentrant notContract {
-        require(msg.value >= minBetAmount, "Bet amount must be greater than minBetAmount");
-        require(Bets[currentRoundID][msg.sender].Amount == 0, "Can only bet once per round");
-
+    function BetBull() public payable whenNotPaused nonReentrant notContract bettable {
         uint256 amount = msg.value;
         RoundInfo storage game = Games[currentRoundID];
         game.PredictBullAmount = game.PredictBullAmount + amount;
@@ -148,10 +166,7 @@ contract BetGame is Ownable, Pausable, ReentrancyGuard {
         Bets[currentRoundID][msg.sender].Predict = Prediction.Bull;
     } 
 
-    function BetBear() public payable whenNotPaused nonReentrant notContract {
-        require(msg.value >= minBetAmount, "Bet amount must be greater than minBetAmount");
-        require(Bets[currentRoundID][msg.sender].Amount == 0, "Can only bet once per round");
-
+    function BetBear() public payable whenNotPaused nonReentrant notContract bettable {
         uint256 amount = msg.value;
         RoundInfo storage game = Games[currentRoundID];
         game.PredictBearAmount = game.PredictBearAmount + amount;
@@ -183,53 +198,45 @@ contract BetGame is Ownable, Pausable, ReentrancyGuard {
         require(lockPrice > 0, "lockPrice should greater than 0");
         require(endPrice > 0, "endPrice should greater than 0");
 
-        uint256 share;
-
         // bull
         if (endPrice > lockPrice) {
-            share = bearAmount / bearParticipants;
+            Results[_round].Share = bearAmount / bullParticipants;
+            Results[_round].Answer = Result.Bull;
         }
         // bear
         if (endPrice < lockPrice) {
-            share = bullAmount / bullParticipants;
+            Results[_round].Share = bullAmount / bearParticipants;
+            Results[_round].Answer = Result.Bear;
+        }
+        // no winner 
+        if (endPrice == lockPrice) {
+            Results[_round].Answer = Result.NoWinner;
+        } else {
+            require(Results[_round].Share > 0, "share should greater than 0");
         }
 
-        require(share > 0, "share should greater than 0");
-
-        Results[_round].BeCalculated = true;
-        Results[_round].Share = share;
+        Results[_round].BeCalculated = true;        
     }
     
     function ClaimReward(uint256 _round) public whenNotPaused nonReentrant notContract {
         require(block.timestamp >= Games[_round].EndTime + rewardInterval, "");
         require(Results[_round].BeCalculated, "result should be calculated first");
         require(Bets[_round][msg.sender].Amount > 0, "users amount should greater than 0");
-        
-        int256 lockPrice = Games[_round].LockPrice;
-        int256 endPrice = Games[_round].EndPrice;
-        uint256 share = Results[_round].Share;
-
-        Prediction result; // 和 LockTime 相同就沒輸沒贏
-        if (endPrice > lockPrice) {
-            result = Prediction.Bull;
-        }
-        if (endPrice < lockPrice) {
-            result = Prediction.Bear;
-        }
         // 退費
-        if (endPrice == lockPrice) {
+        if (Results[_round].Answer == Result.NoWinner) {
              _safeTransfer(msg.sender, Bets[_round][msg.sender].Amount);
         }
 
-        if (result == Bets[_round][msg.sender].Predict) {
-            uint256 winAmount = Bets[_round][msg.sender].Amount + share;
+        if ((Results[_round].Answer == Result.Bear && Bets[_round][msg.sender].Predict == Prediction.Bear) ||
+         (Results[_round].Answer == Result.Bear && Bets[_round][msg.sender].Predict == Prediction.Bear)) {
+            uint256 winAmount = Bets[_round][msg.sender].Amount + Results[_round].Share;
             Bets[_round][msg.sender].Amount = 0;
             _safeTransfer(msg.sender, winAmount);
         }
     }
 
     function _safeTransfer(address to, uint256 value) internal {
-        (bool success, ) = to.call{gas: 23000, value: value}("");
+        (bool success, ) = to.call{value: value}("");
         require(success, "Transfer Failed");
     }
 
