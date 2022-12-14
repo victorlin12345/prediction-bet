@@ -25,8 +25,21 @@ describe("Bet Game Test", function () {
             await loadFixture(deployContractFixture);
         });
 
-        it("get latest price > 0:", async function () {
-            expect(await betGame.GetLatestPrice()).to.gt(0);
+        it("owner execute round begin", async function () {
+            await betGame.ExecuteRoundBegin();
+            console.log(await time.latest());
+        });
+
+        it("execute round lock", async function () {
+            await time.increase(3600 * 3);
+            await betGame.ExecuteRoundLock();
+            console.log(await time.latest());
+        });
+
+        it("execute round end", async function () {
+            await time.increase(3600 * 3);
+            await betGame.ExecuteRoundEnd();
+            console.log(await time.latest());
         });
     });
 
